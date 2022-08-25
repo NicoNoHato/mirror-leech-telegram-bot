@@ -1,4 +1,4 @@
-from re import match as re_match, findall as re_findall
+from re import findall as re_findall
 from threading import Thread, Event
 from time import time
 from math import ceil
@@ -6,10 +6,9 @@ from html import escape
 from psutil import virtual_memory, cpu_percent, disk_usage
 from requests import head as rhead
 from urllib.request import urlopen
-from telegram import InlineKeyboardMarkup
 
+from bot import download_dict, download_dict_lock, STATUS_LIMIT, botStartTime, DOWNLOAD_DIR, WEB_PINCODE, BASE_URL
 from bot.helper.telegram_helper.bot_commands import BotCommands
-from bot import download_dict, download_dict_lock, STATUS_LIMIT, botStartTime, DOWNLOAD_DIR
 from bot.helper.telegram_helper.button_build import ButtonMaker
 
 MAGNET_REGEX = r"magnet:\?xt=urn:btih:[a-zA-Z0-9]*"
@@ -21,17 +20,16 @@ PAGE_NO = 1
 
 
 class MirrorStatus:
-    STATUS_UPLOADING = "Uploading...📤"
-    STATUS_DOWNLOADING = "Downloading...📥"
-    STATUS_CLONING = "Cloning...♻️"
-    STATUS_WAITING = "Queued...💤"
-    STATUS_FAILED = "Failed 🚫. Cleaning Download..."
-    STATUS_PAUSE = "Paused...⛔️"
-    STATUS_ARCHIVING = "Archiving...🔐"
-    STATUS_EXTRACTING = "Extracting...📂"
-    STATUS_SPLITTING = "Splitting...✂️"
-    STATUS_CHECKING = "CheckingUp...📝"
-    STATUS_SEEDING = "Seeding...🌧"
+    STATUS_UPLOADING = "Upload"
+    STATUS_DOWNLOADING = "Download"
+    STATUS_CLONING = "Clone"
+    STATUS_WAITING = "Queue"
+    STATUS_PAUSED = "Pause"
+    STATUS_ARCHIVING = "Archive"
+    STATUS_EXTRACTING = "Extract"
+    STATUS_SPLITTING = "Split"
+    STATUS_CHECKING = "CheckUp"
+    STATUS_SEEDING = "Seed"
 
 SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
 
@@ -68,16 +66,7 @@ def get_readable_file_size(size_in_bytes) -> str:
 def getDownloadByGid(gid):
     with download_dict_lock:
         for dl in list(download_dict.values()):
-            status = dl.status()
-            if (
-                status
-                not in [
-                    MirrorStatus.STATUS_ARCHIVING,
-                    MirrorStatus.STATUS_EXTRACTING,
-                    MirrorStatus.STATUS_SPLITTING,
-                ]
-                and dl.gid() == gid
-            ):
+            if dl.gid() == gid:
                 return dl
     return None
 
@@ -85,20 +74,31 @@ def getAllDownload(req_status: str):
     with download_dict_lock:
         for dl in list(download_dict.values()):
             status = dl.status()
-            if status not in [MirrorStatus.STATUS_ARCHIVING, MirrorStatus.STATUS_EXTRACTING, MirrorStatus.STATUS_SPLITTING] and dl:
-                if req_status == 'down' and (status not in [MirrorStatus.STATUS_SEEDING,
-                                                            MirrorStatus.STATUS_UPLOADING,
-                                                            MirrorStatus.STATUS_CLONING]):
-                    return dl
-                elif req_status == 'up' and status == MirrorStatus.STATUS_UPLOADING:
-                    return dl
-                elif req_status == 'clone' and status == MirrorStatus.STATUS_CLONING:
-                    return dl
-                elif req_status == 'seed' and status == MirrorStatus.STATUS_SEEDING:
-                    return dl
-                elif req_status == 'all':
-                    return dl
+            if req_status in ['all', status]:
+                return dl
     return None
+
+def bt_selection_buttons(id_: str):
+    if len(id_) > 20:
+        gid = id_[:12]
+    else:
+        gid = id_
+
+    pincode = ""
+    for n in id_:
+        if n.isdigit():
+            pincode += str(n)
+        if len(pincode) == 4:
+            break
+
+    buttons = ButtonMaker()
+    if WEB_PINCODE:
+        buttons.buildbutton("Select Files", f"{BASE_URL}/app/files/{id_}")
+        buttons.sbutton("Pincode", f"btsel pin {gid} {pincode}")
+    else:
+        buttons.buildbutton("Select Files", f"{BASE_URL}/app/files/{id_}?pin_code={pincode}")
+    buttons.sbutton("Done Selecting", f"btsel done {gid} {id_}")
+    return buttons.build_menu(2)
 
 def get_progress_bar_string(status):
     completed = status.processed_bytes() / 8
@@ -122,68 +122,61 @@ def get_readable_message():
                 globals()['COUNT'] -= STATUS_LIMIT
                 globals()['PAGE_NO'] -= 1
         for index, download in enumerate(list(download_dict.values())[COUNT:], start=1):
-            msg += f"<b>Name:</b> <code>{escape(str(download.name()))}</code>"
-            msg += f"\n<b>Status:</b> <i>{download.status()}</i>"
-            if download.status() not in [
-                MirrorStatus.STATUS_ARCHIVING,
-                MirrorStatus.STATUS_EXTRACTING,
-                MirrorStatus.STATUS_SPLITTING,
-                MirrorStatus.STATUS_SEEDING,
-            ]:
+            msg += f"<b><a href='{download.message.link}'>{download.status()}</a>: </b>"
+            msg += f"<code>{escape(str(download.name()))}</code>"
+            if download.status() not in [MirrorStatus.STATUS_SPLITTING, MirrorStatus.STATUS_SEEDING]:
                 msg += f"\n{get_progress_bar_string(download)} {download.progress()}"
-                if download.status() == MirrorStatus.STATUS_CLONING:
-                    msg += f"\n<b>Cloned:</b> {get_readable_file_size(download.processed_bytes())} of {download.size()}"
-                elif download.status() == MirrorStatus.STATUS_UPLOADING:
-                    msg += f"\n<b>Uploaded:</b> {get_readable_file_size(download.processed_bytes())} of {download.size()}"
-                else:
-                    msg += f"\n<b>Downloaded:</b> {get_readable_file_size(download.processed_bytes())} of {download.size()}"
+                msg += f"\n<b>Processed:</b> {get_readable_file_size(download.processed_bytes())} of {download.size()}"
                 msg += f"\n<b>Speed:</b> {download.speed()} | <b>ETA:</b> {download.eta()}"
-                try:
-                    msg += f"\n<b>Seeders:</b> {download.aria_download().num_seeders}" \
-                           f" | <b>Peers:</b> {download.aria_download().connections}"
-                except:
-                    pass
-                try:
-                    msg += f"\n<b>Seeders:</b> {download.torrent_info().num_seeds}" \
-                           f" | <b>Leechers:</b> {download.torrent_info().num_leechs}"
-                except:
-                    pass
-                msg += f"\n<code>/{BotCommands.CancelMirror} {download.gid()}</code>"
+                if hasattr(download, 'seeders_num'):
+                    try:
+                        msg += f"\n<b>Seeders:</b> {download.seeders_num()} | <b>Leechers:</b> {download.leechers_num()}"
+                    except:
+                        pass
             elif download.status() == MirrorStatus.STATUS_SEEDING:
                 msg += f"\n<b>Size: </b>{download.size()}"
-                msg += f"\n<b>Speed: </b>{get_readable_file_size(download.torrent_info().upspeed)}/s"
-                msg += f" | <b>Uploaded: </b>{get_readable_file_size(download.torrent_info().uploaded)}"
-                msg += f"\n<b>Ratio: </b>{round(download.torrent_info().ratio, 3)}"
-                msg += f" | <b>Time: </b>{get_readable_time(download.torrent_info().seeding_time)}"
-                msg += f"\n<code>/{BotCommands.CancelMirror} {download.gid()}</code>"
+                msg += f"\n<b>Speed: </b>{download.upload_speed()}"
+                msg += f" | <b>Uploaded: </b>{download.uploaded_bytes()}"
+                msg += f"\n<b>Ratio: </b>{download.ratio()}"
+                msg += f" | <b>Time: </b>{download.seeding_time()}"
             else:
                 msg += f"\n<b>Size: </b>{download.size()}"
+            msg += f"\n<code>/{BotCommands.CancelMirror} {download.gid()}</code>"
             msg += "\n\n"
             if STATUS_LIMIT is not None and index == STATUS_LIMIT:
                 break
+        if len(msg) == 0:
+            return None, None
+        dl_speed = 0
+        up_speed = 0
+        for download in list(download_dict.values()):
+            if download.status() == MirrorStatus.STATUS_DOWNLOADING:
+                spd = download.speed()
+                if 'K' in spd:
+                    dl_speed += float(spd.split('K')[0]) * 1024
+                elif 'M' in spd:
+                    dl_speed += float(spd.split('M')[0]) * 1048576
+            elif download.status() == MirrorStatus.STATUS_UPLOADING:
+                spd = download.speed()
+                if 'KB/s' in spd:
+                    up_speed += float(spd.split('K')[0]) * 1024
+                elif 'MB/s' in spd:
+                    up_speed += float(spd.split('M')[0]) * 1048576
+            elif download.status() == MirrorStatus.STATUS_SEEDING:
+                spd = download.upload_speed()
+                if 'K' in spd:
+                    up_speed += float(spd.split('K')[0]) * 1024
+                elif 'M' in spd:
+                    up_speed += float(spd.split('M')[0]) * 1048576
         bmsg = f"<b>CPU:</b> {cpu_percent()}% | <b>FREE:</b> {get_readable_file_size(disk_usage(DOWNLOAD_DIR).free)}"
         bmsg += f"\n<b>RAM:</b> {virtual_memory().percent}% | <b>UPTIME:</b> {get_readable_time(time() - botStartTime)}"
-        dlspeed_bytes = 0
-        upspeed_bytes = 0
-        for download in list(download_dict.values()):
-            spd = download.speed()
-            if download.status() == MirrorStatus.STATUS_DOWNLOADING:
-                if 'K' in spd:
-                    dlspeed_bytes += float(spd.split('K')[0]) * 1024
-                elif 'M' in spd:
-                    dlspeed_bytes += float(spd.split('M')[0]) * 1048576
-            elif download.status() == MirrorStatus.STATUS_UPLOADING:
-                if 'KB/s' in spd:
-                    upspeed_bytes += float(spd.split('K')[0]) * 1024
-                elif 'MB/s' in spd:
-                    upspeed_bytes += float(spd.split('M')[0]) * 1048576
-        bmsg += f"\n<b>DL:</b> {get_readable_file_size(dlspeed_bytes)}/s | <b>UL:</b> {get_readable_file_size(upspeed_bytes)}/s"
+        bmsg += f"\n<b>DL:</b> {get_readable_file_size(dl_speed)}/s | <b>UL:</b> {get_readable_file_size(up_speed)}/s"
         if STATUS_LIMIT is not None and tasks > STATUS_LIMIT:
             msg += f"<b>Page:</b> {PAGE_NO}/{pages} | <b>Tasks:</b> {tasks}\n"
             buttons = ButtonMaker()
             buttons.sbutton("Previous", "status pre")
             buttons.sbutton("Next", "status nex")
-            button = InlineKeyboardMarkup(buttons.build_menu(2))
+            button = buttons.build_menu(2)
             return msg + bmsg, button
         return msg + bmsg, ""
 
@@ -234,10 +227,6 @@ def is_url(url: str):
 def is_gdrive_link(url: str):
     return "drive.google.com" in url
 
-def is_gdtot_link(url: str):
-    url = re_match(r'https?://.+\.gdtot\.\S+', url)
-    return bool(url)
-
 def is_mega_link(url: str):
     return "mega.nz" in url or "mega.co.nz" in url
 
@@ -278,4 +267,3 @@ def get_content_type(link: str) -> str:
         except:
             content_type = None
     return content_type
-
